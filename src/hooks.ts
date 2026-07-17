@@ -5,6 +5,7 @@ import {
   PromptExampleFactory,
   UIExampleFactory,
 } from "./modules/examples";
+import { blockDuplicateItem } from "./modules/noDuplicates";
 import { getString, initLocale } from "./utils/locale";
 import { registerPrefsScripts } from "./modules/preferenceScript";
 import { createZToolkit } from "./utils/ztoolkit";
@@ -117,17 +118,37 @@ async function onNotify(
   ids: Array<string | number>,
   extraData: { [key: string]: any },
 ) {
-  // You can add your code to the corresponding notify type
   ztoolkit.log("notify", event, type, ids, extraData);
-  if (
-    event == "select" &&
-    type == "tab" &&
-    extraData[ids[0]].type == "reader"
-  ) {
-    BasicExampleFactory.exampleNotifierCallback();
-  } else {
+
+  if (event !== "add" || type !== "item") {
     return;
   }
+
+  let blockedCount = 0;
+  for (const id of ids) {
+    const item = await Zotero.Items.getAsync(id);
+    const existingItem = await blockDuplicateItem(item);
+    if (existingItem) {
+      blockedCount += 1;
+    }
+  }
+
+  if (blockedCount <= 0) {
+    return;
+  }
+
+  const blockedSummary =
+    blockedCount === 1
+      ? "Duplicate item blocked and moved to Trash."
+      : `${blockedCount} duplicate items blocked and moved to Trash.`;
+
+  new ztoolkit.ProgressWindow(addon.data.config.addonName)
+    .createLine({
+      text: blockedSummary,
+      type: "default",
+      progress: 100,
+    })
+    .show();
 }
 
 /**
