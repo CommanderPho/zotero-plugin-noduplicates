@@ -1,5 +1,2 @@
-pref-title = Addon Template Example
-pref-enable =
-    .label = Enable
-pref-input = Input
-pref-help = { $name } Build { $version } { $time }
+# No Duplicates - preferences locale strings
+# (No preferences UI required for this plugin)

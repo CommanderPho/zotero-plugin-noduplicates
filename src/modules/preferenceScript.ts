@@ -1,3 +1,4 @@
+// @ts-nocheck — template boilerplate kept for reference; not used by this plugin
 import { config } from "../../package.json";
 import { getString } from "../utils/locale";
 

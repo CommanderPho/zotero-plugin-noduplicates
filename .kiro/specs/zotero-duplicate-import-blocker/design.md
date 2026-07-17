@@ -2,9 +2,9 @@
 
 ## Overview
 
-The `zotero-duplicate-import-blocker` plugin (package name: **No Duplicates**) silently intercepts every new item added to a Zotero library, checks whether an identical item already exists using Zotero's built-in duplicate-detection engine, and — if a duplicate is detected — moves the newly added item to the trash before the user ever sees it. A brief, non-intrusive progress-window toast informs the user what was blocked and what the surviving item is.
+The `zotero-duplicate-import-blocker` plugin (package name: **No Duplicates**) silently intercepts every new item added to a Zotero library, checks whether an identical item already exists using a custom signature-based duplicate detection algorithm, and — if a duplicate is detected — moves the newly added item to the trash before the user ever sees it. A brief, non-intrusive progress-window toast informs the user how many items were blocked.
 
-The plugin is built on the official [windingwind Zotero Plugin Template](https://github.com/windingwind/zotero-plugin-template). It wires into the template's established `hooks.ts → NoDuplicatesFactory` static-factory pattern; no bespoke lifecycle classes are introduced.
+The plugin is built on the official [windingwind Zotero Plugin Template](https://github.com/windingwind/zotero-plugin-template). It wires into the template's established `hooks.ts` lifecycle pattern; all duplicate logic lives in pure exported functions in `noDuplicates.ts`.
 
 ---
 
@@ -20,30 +20,28 @@ graph TD
     BS -->|calls| HSH[hooks.onShutdown]
 
     HS -->|awaits init promises| ZP[Zotero platform ready]
-    HS -->|calls| NDF_REG[NoDuplicatesFactory.registerNotifier]
+    HS -->|calls| IL[initLocale]
 
-    NDF_REG -->|registers observer| ZN[Zotero.Notifier]
-    ZN -->|fires item/add| ON[hooks.onNotify]
-    ON -->|dispatches| NIAF[NoDuplicatesFactory.onItemAdd]
+    ZN[Zotero.Notifier] -->|fires item/add| ON[hooks.onNotify]
+    ON -->|for each id| BDI[blockDuplicateItem]
 
-    NIAF -->|for each id| CHK[NoDuplicatesFactory.checkForDuplicates]
-    CHK -->|duplicate found| TRASH[item.deleted = true; item.saveTx]
-    TRASH -->|notify user| TOAST[NoDuplicatesFactory.showBlockedWarning]
-
-    ZPO[Zotero.Plugins.addObserver] -->|plugin shutdown| UNR[Notifier.unregisterObserver]
+    BDI -->|getDuplicateSignature| SIG[signature: doi / isbn / titleCreatorYear]
+    BDI -->|Zotero.Items.getAll| SCAN[linear scan of library items]
+    SCAN -->|duplicate found| TRASH[Zotero.Items.trashTx item.id]
+    ON -->|batch complete| TOAST[ztoolkit.ProgressWindow summary toast]
 ```
 
-### File layout after implementation
+### File layout
 
 ```
 zotero-plugin-noduplicates/
 ├── package.json                     ← addonName/ID/Ref/Instance updated
 ├── src/
 │   ├── index.ts                     ← unchanged (creates Addon singleton)
-│   ├── addon.ts                     ← unchanged (Addon class + data shape)
-│   ├── hooks.ts                     ← trimmed: only NoDuplicates wiring
+│   ├── addon.ts                     ← minimal (no prefs/dialog data)
+│   ├── hooks.ts                     ← minimal: only NoDuplicates wiring
 │   ├── modules/
-│   │   └── noDuplicates.ts          ← NEW: NoDuplicatesFactory
+│   │   └── noDuplicates.ts          ← pure exported functions
 │   └── utils/
 │       └── ztoolkit.ts              ← unchanged
 └── .kiro/specs/zotero-duplicate-import-blocker/
@@ -62,23 +60,23 @@ sequenceDiagram
     participant Z as Zotero Core
     participant N as Zotero.Notifier
     participant H as hooks.onNotify
-    participant F as NoDuplicatesFactory
-    participant D as Zotero.Duplicates
+    participant BDI as blockDuplicateItem
+    participant SIG as getDuplicateSignature
     participant PW as ztoolkit.ProgressWindow
 
     Z->>N: notify("add", "item", [newID], extraData)
     N->>H: onNotify("add", "item", [newID], extraData)
-    H->>F: onItemAdd([newID])
-    F->>Z: Zotero.Items.getAsync(newID)
-    Z-->>F: item
-    F->>F: isRegularItem() && !inTrash?
-    F->>D: new Zotero.Duplicates(libraryID)
-    D-->>F: duplicatesObj
-    F->>D: duplicatesObj._findDuplicates()
-    F->>D: duplicatesObj.getSetItemsByItemID(newID)
-    D-->>F: [newItem, existingItem, ...]
-    F->>Z: item.deleted = true; await item.saveTx()
-    F->>PW: showBlockedWarning(newTitle, existingID, existingTitle)
+    H->>Z: Zotero.Items.getAsync(newID)
+    Z-->>H: item
+    H->>BDI: blockDuplicateItem(item)
+    BDI->>SIG: getDuplicateSignature(item)
+    SIG-->>BDI: { kind: "doi", value: "10.1000/xyz" }
+    BDI->>Z: Zotero.Items.getAll(libraryID)
+    Z-->>BDI: allItems[]
+    BDI->>BDI: find candidate where areItemsDuplicates && id !== item.id
+    BDI->>Z: Zotero.Items.trashTx(item.id)
+    BDI-->>H: existingItem
+    H->>PW: show("Duplicate item blocked and moved to Trash.")
     PW-->>Z: toast displayed
 ```
 
@@ -88,119 +86,118 @@ sequenceDiagram
 sequenceDiagram
     participant Z as Zotero Core
     participant H as hooks.onNotify
-    participant F as NoDuplicatesFactory
-    participant D as Zotero.Duplicates
+    participant BDI as blockDuplicateItem
+    participant SIG as getDuplicateSignature
 
     Z->>H: onNotify("add", "item", [newID], extraData)
-    H->>F: onItemAdd([newID])
-    F->>D: getSetItemsByItemID(newID)
-    D-->>F: [newItem] (only itself — no duplicates)
-    F-->>H: return (no action)
+    H->>Z: Zotero.Items.getAsync(newID)
+    Z-->>H: item
+    H->>BDI: blockDuplicateItem(item)
+    BDI->>SIG: getDuplicateSignature(item)
+    SIG-->>BDI: { kind: "titleCreatorYear", value: "..." }
+    BDI->>Z: Zotero.Items.getAll(libraryID)
+    Z-->>BDI: allItems[] (no match found)
+    BDI-->>H: null
+    H-->>Z: return (no toast, no action)
 ```
 
 ---
 
 ## Components and Interfaces
 
-### `NoDuplicatesFactory` (`src/modules/noDuplicates.ts`)
+### `noDuplicates.ts` (`src/modules/noDuplicates.ts`)
 
-**Purpose**: Houses all duplicate-blocking logic as a static factory class, following the template's `BasicExampleFactory` pattern.
+**Purpose**: Houses all duplicate-blocking logic as pure exported functions. No class wrapper.
 
 **Interface**:
 
 ```typescript
-export class NoDuplicatesFactory {
-  /** Registers a Zotero.Notifier observer for "item" events and schedules
-   *  its cleanup via Zotero.Plugins.addObserver on plugin shutdown. */
-  static registerNotifier(): void;
+/** Extracts a comparable signature from an item.
+ *  Priority order: DOI → ISBN → title+firstCreator+year.
+ *  Returns null for non-regular items, feed items, or items with insufficient metadata. */
+export function getDuplicateSignature(
+  item: DuplicateComparableItem,
+): DuplicateSignature | null;
 
-  /** Called from hooks.onNotify when event === "add" && type === "item".
-   *  Iterates over ids and initiates duplicate checking for each. */
-  static async onItemAdd(ids: number[] | string[]): Promise<void>;
+/** Returns true when both items share the same signature kind and value. */
+export function areItemsDuplicates(
+  first: DuplicateComparableItem,
+  second: DuplicateComparableItem,
+): boolean;
 
-  /** Resolves the item, instantiates Zotero.Duplicates for its library,
-   *  and returns the full duplicate set (including the new item itself).
-   *  Returns null when Zotero.Duplicates is unavailable or item is not
-   *  a regular, non-trashed item. */
-  static async checkForDuplicates(
-    itemID: number,
-  ): Promise<Zotero.Item[] | null>;
+/** Checks all items in the library for a duplicate of item.
+ *  If a duplicate is found, moves item to trash via Zotero.Items.trashTx
+ *  and returns the surviving (pre-existing) item.
+ *  Returns null when no duplicate exists or item is ineligible. */
+export async function blockDuplicateItem(
+  item: Zotero.Item,
+): Promise<Zotero.Item | null>;
 
-  /** Moves item to trash (sets deleted flag and persists). */
-  static async trashItem(item: Zotero.Item): Promise<void>;
+// Normalisation helpers (also exported for testing):
+export function normalizeDOI(value: string): string;
+export function normalizeISBN(value: string): string;
+export function extractYear(value: string): string;
+```
 
-  /** Displays a ProgressWindow toast describing what was blocked. */
-  static showBlockedWarning(
-    blockedTitle: string,
-    existingItemID: number,
-    existingTitle: string,
-  ): void;
+**`DuplicateSignature` type**:
 
-  /** Unregisters the Zotero.Notifier observer. Called automatically
-   *  on plugin shutdown via Zotero.Plugins.addObserver. */
-  private static unregisterNotifier(notifierID: string): void;
+```typescript
+interface DuplicateSignature {
+  kind: "doi" | "isbn" | "titleCreatorYear";
+  value: string;
 }
 ```
 
+**Signature extraction priority**:
+
+| Priority | Field | Normalisation |
+|---|---|---|
+| 1 | DOI | lowercase, strip `https?://(dx.)doi.org/` prefix |
+| 2 | ISBN | uppercase, strip non-`[0-9X]` chars, must be 10 or 13 digits |
+| 3 | title + firstCreator + year | lowercase+trim, concatenated with `\|` separator |
+
+For priority 3, at least one of `firstCreator` or `year` must be non-empty (title-only matches are too broad).
+
 **Responsibilities**:
-- Registers and unregisters the Zotero.Notifier observer
-- Filters out notes, attachments, feed items, and already-trashed items
-- Delegates to `Zotero.Duplicates` for similarity computation
-- Moves the newly added item to trash when a pre-existing duplicate is found
-- Displays a non-intrusive toast via `ztoolkit.ProgressWindow`
-- Handles graceful degradation when `Zotero.Duplicates` is unavailable
+- Extracts a normalised, comparable signature for each eligible item
+- Performs a linear scan of all library items to find a matching duplicate
+- Moves the newly added item to trash using `Zotero.Items.trashTx`
+- Returns the surviving duplicate item so the caller can report it
 
 ---
 
-### `hooks.ts` (modified)
+### `hooks.ts` (minimal)
 
-**Changes from template**:
-- Removes all `UIExampleFactory`, `KeyExampleFactory`, `PromptExampleFactory`, `HelperExampleFactory` registrations from `onStartup` and `onMainWindowLoad`
-- Removes `registerPrefs()` call
-- Imports and calls `NoDuplicatesFactory.registerNotifier()` in `onStartup`
-- Adds `if (event === "add" && type === "item")` branch in `onNotify` dispatching to `NoDuplicatesFactory.onItemAdd(ids)`
+**Responsibilities**:
+- Awaits Zotero init promises in `onStartup`, calls `initLocale`, loads main windows
+- `onMainWindowLoad` creates the ztoolkit instance
+- `onNotify` filters for `event === "add" && type === "item"`, then loops over IDs calling `blockDuplicateItem` for each
+- After the loop, shows a single summary toast if any items were blocked
+- Notifier registration is handled by the template's `bootstrap.js`/`addon.hooks` wiring — no manual `registerNotifier` call needed
 
-**Minimal `onStartup`**:
-
-```typescript
-async function onStartup() {
-  await Promise.all([
-    Zotero.initializationPromise,
-    Zotero.unlockPromise,
-    Zotero.uiReadyPromise,
-  ]);
-
-  NoDuplicatesFactory.registerNotifier();
-
-  await Promise.all(
-    Zotero.getMainWindows().map((win) => onMainWindowLoad(win)),
-  );
-
-  addon.data.initialized = true;
-}
-```
-
-**Minimal `onMainWindowLoad`**:
+**`onNotify` logic**:
 
 ```typescript
-async function onMainWindowLoad(win: _ZoteroTypes.MainWindow): Promise<void> {
-  addon.data.ztoolkit = createZToolkit();
-}
-```
+async function onNotify(event, type, ids, extraData) {
+  if (event !== "add" || type !== "item") return;
 
-**`onNotify` with duplicate-blocking dispatch**:
-
-```typescript
-async function onNotify(
-  event: string,
-  type: string,
-  ids: Array<string | number>,
-  extraData: { [key: string]: any },
-) {
-  ztoolkit.log("notify", event, type, ids, extraData);
-  if (event === "add" && type === "item") {
-    await NoDuplicatesFactory.onItemAdd(ids);
+  let blockedCount = 0;
+  for (const id of ids) {
+    const item = await Zotero.Items.getAsync(id);
+    const existingItem = await blockDuplicateItem(item);
+    if (existingItem) blockedCount += 1;
   }
+
+  if (blockedCount <= 0) return;
+
+  const summary =
+    blockedCount === 1
+      ? "Duplicate item blocked and moved to Trash."
+      : `${blockedCount} duplicate items blocked and moved to Trash.`;
+
+  new ztoolkit.ProgressWindow(addon.data.config.addonName)
+    .createLine({ text: summary, type: "default", progress: 100 })
+    .show();
 }
 ```
 
@@ -222,275 +219,182 @@ async function onNotify(
 
 ## Data Models
 
-### `DuplicateCheckResult`
+### `DuplicateSignature`
 
-Not a standalone type — the result of `checkForDuplicates` is `Zotero.Item[] | null`:
+| Field | Type | Meaning |
+|---|---|---|
+| `kind` | `"doi" \| "isbn" \| "titleCreatorYear"` | Which field the signature is based on |
+| `value` | `string` | Normalised, comparable value |
 
-| Value | Meaning |
-|---|---|
-| `null` | Item is not eligible (note/attachment/trashed) or `Zotero.Duplicates` unavailable |
-| Array with length `<= 1` | No duplicates; only the item itself (or empty) |
-| Array with length `>= 2` | Duplicate set found; index 0 is NOT guaranteed to be the new item |
+Two items are duplicates iff both their signatures are non-null, their `kind` values match, and their `value` strings match exactly.
 
 ### Eligibility filter
 
 An item passes the eligibility filter when **all** of the following hold:
 
 ```typescript
-item.isRegularItem()        // not a note or attachment
-&& !item.deleted            // not already in trash
-&& !item.isFeedItem         // not a feed item (RSS)
-&& item.libraryID !== null  // belongs to a library
+item.isRegularItem()   // not a note or attachment
+&& !item.isFeedItem    // not a feed item (RSS)
 ```
+
+Items already in the trash still produce a signature — `blockDuplicateItem` itself does not short-circuit on `item.deleted`. The linear scan uses `areItemsDuplicates` which calls `getDuplicateSignature`, and feed items / non-regular items return `null` from that function.
 
 ---
 
 ## Algorithmic Pseudocode
 
-### `registerNotifier()`
+### `getDuplicateSignature(item)`
 
 ```pascal
-PROCEDURE NoDuplicatesFactory.registerNotifier()
-  SEQUENCE
-    callback ← {
-      notify: ASYNC PROCEDURE(event, type, ids, extraData)
-        IF NOT addon.data.alive THEN
-          NoDuplicatesFactory.unregisterNotifier(notifierID)
-          RETURN
-        END IF
-        addon.hooks.onNotify(event, type, ids, extraData)
-      END PROCEDURE
-    }
+FUNCTION getDuplicateSignature(item)
+  INPUT: item — DuplicateComparableItem
+  OUTPUT: DuplicateSignature or NULL
 
-    notifierID ← Zotero.Notifier.registerObserver(callback, ["item"])
+  IF NOT item.isRegularItem() OR item.isFeedItem THEN
+    RETURN NULL
+  END IF
 
-    Zotero.Plugins.addObserver({
-      shutdown: PROCEDURE({ id })
-        IF id EQUALS addon.data.config.addonID THEN
-          NoDuplicatesFactory.unregisterNotifier(notifierID)
-        END IF
-      END PROCEDURE
-    })
-  END SEQUENCE
-END PROCEDURE
+  doi ← normalizeDOI(item.getField("DOI"))
+  IF doi IS NOT EMPTY THEN
+    RETURN { kind: "doi", value: doi }
+  END IF
+
+  isbn ← normalizeISBN(item.getField("ISBN"))
+  IF LENGTH(isbn) IS 10 OR 13 THEN
+    RETURN { kind: "isbn", value: isbn }
+  END IF
+
+  title ← normalizeText(item.getField("title"))
+  IF title IS EMPTY THEN
+    RETURN NULL
+  END IF
+
+  creator ← normalizeText(item.firstCreator OR "")
+  year ← extractYear(item.getField("date", true, true))
+
+  IF creator IS EMPTY AND year IS EMPTY THEN
+    RETURN NULL
+  END IF
+
+  RETURN { kind: "titleCreatorYear", value: title + "|" + creator + "|" + year }
+END FUNCTION
 ```
-
-**Preconditions:**
-- `addon.data.alive` is `true`
-- `addon.data.config.addonID` is a non-empty string
-
-**Postconditions:**
-- A notifier observer is registered with `Zotero.Notifier` for `["item"]` events
-- A shutdown observer is registered that will clean up the notifier when the plugin stops
 
 ---
 
-### `onItemAdd(ids)`
+### `blockDuplicateItem(item)`
 
 ```pascal
-PROCEDURE NoDuplicatesFactory.onItemAdd(ids)
-  INPUT: ids — array of item IDs (number | string) from notifier event
-  OUTPUT: none (side effects: items may be trashed, toast may be shown)
+FUNCTION blockDuplicateItem(item)
+  INPUT: item — Zotero.Item (the newly added item)
+  OUTPUT: Zotero.Item (the surviving duplicate) or NULL
 
-  FOR EACH id IN ids DO
-    duplicates ← AWAIT NoDuplicatesFactory.checkForDuplicates(id)
-
-    IF duplicates IS NULL THEN
-      CONTINUE  // ineligible item or Zotero.Duplicates unavailable
-    END IF
-
-    IF LENGTH(duplicates) <= 1 THEN
-      CONTINUE  // no duplicate found — leave item untouched
-    END IF
-
-    // Find the pre-existing item (the one that is NOT the new id)
-    newItem ← Zotero.Items.get(id)
-    existingItem ← FIRST item IN duplicates WHERE item.id NOT EQUALS id
-
-    IF existingItem IS NULL THEN
-      CONTINUE  // defensive: all set members are the new item (shouldn't happen)
-    END IF
-
-    AWAIT NoDuplicatesFactory.trashItem(newItem)
-
-    NoDuplicatesFactory.showBlockedWarning(
-      newItem.getField("title"),
-      existingItem.id,
-      existingItem.getField("title")
-    )
-  END FOR
-END PROCEDURE
-```
-
-**Preconditions:**
-- `ids` is a non-empty array (notifier guarantees this)
-- `addon.data.alive` is `true`
-
-**Postconditions:**
-- For each id that has a duplicate: the corresponding item has `deleted === true` and has been persisted via `saveTx()`
-- For each id that has a duplicate: a toast has been displayed
-- Items without duplicates are untouched
-- Errors for individual items are caught and logged; they do not abort processing of remaining ids
-
-**Loop invariant**: After each iteration, all previously processed items that had duplicates have been trashed and notified; no un-processed item has been modified.
-
----
-
-### `checkForDuplicates(itemID)`
-
-```pascal
-FUNCTION NoDuplicatesFactory.checkForDuplicates(itemID)
-  INPUT: itemID — integer item ID
-  OUTPUT: Zotero.Item[] or NULL
-
-  item ← AWAIT Zotero.Items.getAsync(itemID)
-
-  IF item IS NULL THEN
-    RETURN NULL
+  itemSignature ← getDuplicateSignature(item)
+  IF itemSignature IS NULL THEN
+    RETURN NULL  // item is ineligible (note/attachment/feed/no metadata)
   END IF
 
-  IF NOT item.isRegularItem() THEN
-    RETURN NULL
+  allLibraryItems ← AWAIT Zotero.Items.getAll(item.libraryID)
+
+  duplicate ← FIRST candidate IN allLibraryItems WHERE
+    candidate.id NOT EQUALS item.id
+    AND areItemsDuplicates(item, candidate)
+
+  IF duplicate IS NULL THEN
+    RETURN NULL  // no match found — item is unique
   END IF
 
-  IF item.deleted THEN
-    RETURN NULL
-  END IF
-
-  IF item.isFeedItem THEN
-    RETURN NULL
-  END IF
-
-  IF NOT Zotero.Duplicates EXISTS THEN
-    ztoolkit.log("Zotero.Duplicates unavailable — skipping check")
-    RETURN NULL
-  END IF
-
-  TRY
-    duplicatesObj ← NEW Zotero.Duplicates(item.libraryID)
-    AWAIT duplicatesObj._findDuplicates()
-    duplicateSet ← duplicatesObj.getSetItemsByItemID(itemID)
-    RETURN duplicateSet
-  CATCH error
-    ztoolkit.log("checkForDuplicates error:", error)
-    RETURN NULL
-  END TRY
+  AWAIT Zotero.Items.trashTx(item.id)
+  RETURN duplicate
 END FUNCTION
 ```
 
 **Preconditions:**
-- `itemID` is a positive integer that exists in the Zotero database
+- `item` is a valid Zotero item retrieved via `getAsync`
+- `item.libraryID` is valid
 
 **Postconditions:**
-- Returns `null` when item is ineligible or `Zotero.Duplicates` is unavailable
-- Returns an array (possibly empty or length 1) when no duplicate found
-- Returns an array of length >= 2 when duplicates exist
-- No mutations to any Zotero item
+- If a duplicate was found: `item` is in the Zotero trash (via `trashTx`) and the duplicate is returned
+- If no duplicate: `item` is unmodified and `null` is returned
+- `trashTx` is a transactional trash operation (not permanent deletion)
 
 ---
 
-### `trashItem(item)`
+### `onNotify` batch processing
 
 ```pascal
-PROCEDURE NoDuplicatesFactory.trashItem(item)
-  INPUT: item — a Zotero.Item that has passed eligibility checks
-  OUTPUT: none (side effect: item is moved to trash in the database)
+PROCEDURE onNotify(event, type, ids, extraData)
+  IF event NOT EQUALS "add" OR type NOT EQUALS "item" THEN
+    RETURN
+  END IF
 
-  item.deleted ← true
-  AWAIT item.saveTx()
+  blockedCount ← 0
+
+  FOR EACH id IN ids DO
+    item ← AWAIT Zotero.Items.getAsync(id)
+    existingItem ← AWAIT blockDuplicateItem(item)
+    IF existingItem IS NOT NULL THEN
+      blockedCount ← blockedCount + 1
+    END IF
+  END FOR
+
+  IF blockedCount <= 0 THEN
+    RETURN
+  END IF
+
+  summary ← IF blockedCount EQUALS 1
+    THEN "Duplicate item blocked and moved to Trash."
+    ELSE blockedCount + " duplicate items blocked and moved to Trash."
+
+  SHOW ProgressWindow(addonName).createLine(summary).show()
 END PROCEDURE
 ```
 
-**Preconditions:**
-- `item` is a regular, non-deleted Zotero item
-- Zotero database is accessible
-
 **Postconditions:**
-- `item.deleted === true`
-- Change persisted to Zotero database (item visible in trash, not permanently deleted)
-
----
-
-### `showBlockedWarning(blockedTitle, existingItemID, existingTitle)`
-
-```pascal
-PROCEDURE NoDuplicatesFactory.showBlockedWarning(blockedTitle, existingItemID, existingTitle)
-  INPUT:
-    blockedTitle   — string title of the blocked (trashed) item
-    existingItemID — integer ID of the surviving duplicate
-    existingTitle  — string title of the surviving duplicate
-
-  NEW ztoolkit.ProgressWindow(addon.data.config.addonName)
-    .createLine({
-      text: "Duplicate blocked: \"" + blockedTitle + "\"",
-      type: "default",
-      progress: 100
-    })
-    .createLine({
-      text: "Existing item: \"" + existingTitle + "\"",
-      type: "success",
-      progress: 100
-    })
-    .show()
-END PROCEDURE
-```
-
-**Preconditions:**
-- `ztoolkit` global is initialised (guaranteed after `onMainWindowLoad`)
-- `blockedTitle` and `existingTitle` are strings (may be empty if item has no title)
-
-**Postconditions:**
-- A ProgressWindow toast is displayed in the Zotero main window
-- The toast closes automatically after the default timer (no user action required)
+- For each duplicate found: the new item is trashed
+- A single summary toast is shown once per batch (not once per duplicate)
+- No toast is shown when no duplicates are found
 
 ---
 
 ## Error Handling
 
-### Scenario 1: `Zotero.Duplicates` API unavailable
-
-**Condition**: Future Zotero version removes or renames `Zotero.Duplicates`.  
-**Response**: `checkForDuplicates` returns `null` after logging a warning via `ztoolkit.log`.  
-**Recovery**: Item is left untouched; plugin continues running without blocking imports.
-
----
-
-### Scenario 2: Item deleted between notifier fire and processing
-
-**Condition**: Item is deleted externally (e.g., undo operation) between the notifier firing and `checkForDuplicates` executing.  
-**Response**: `item.deleted` check in `checkForDuplicates` returns `null`.  
-**Recovery**: No action taken; safe no-op.
-
----
-
-### Scenario 3: `_findDuplicates()` or `getSetItemsByItemID()` throws
-
-**Condition**: Internal Zotero error during duplicate search (e.g., malformed item fields, database lock).  
-**Response**: `try/catch` in `checkForDuplicates` logs the error and returns `null`.  
-**Recovery**: Item is left untouched; subsequent IDs in the batch continue processing.
-
----
-
-### Scenario 4: `item.saveTx()` throws during trash operation
-
-**Condition**: Database write fails (e.g., library locked by sync).  
-**Response**: Error propagates up from `trashItem`; caught by `onItemAdd`'s per-item try/catch.  
-**Recovery**: Item remains un-trashed; toast is not shown; next item in batch is still processed.
-
----
-
-### Scenario 5: Item is a note, attachment, or feed item
+### Scenario 1: Item is a note, attachment, or feed item
 
 **Condition**: Notifier fires for non-regular-item types (file attachments, notes, RSS entries).  
-**Response**: Eligibility filter in `checkForDuplicates` returns `null` immediately.  
-**Recovery**: Item is untouched; no performance overhead from duplicate search.
+**Response**: `getDuplicateSignature` returns `null` → `blockDuplicateItem` returns `null`.  
+**Recovery**: Item is untouched; no performance overhead from library scan.
 
 ---
 
-### Scenario 6: Plugin is shutting down during item processing
+### Scenario 2: Item has no usable metadata (no DOI, no ISBN, title-only)
+
+**Condition**: Item has a title but no creator and no year.  
+**Response**: `getDuplicateSignature` returns `null` (title-only is too broad for safe deduplication).  
+**Recovery**: Item is left as-is; no false-positive blocking.
+
+---
+
+### Scenario 3: Item deleted between notifier fire and processing
+
+**Condition**: Item is deleted externally between the notifier firing and `blockDuplicateItem` executing.  
+**Response**: `Zotero.Items.getAsync` may return a deleted item; `getDuplicateSignature` still runs. The risk is low since `trashTx` on an already-deleted item is a no-op.  
+**Recovery**: Safe no-op.
+
+---
+
+### Scenario 4: `Zotero.Items.trashTx` throws
+
+**Condition**: Database write fails (e.g., library locked by sync).  
+**Response**: Error propagates up from `blockDuplicateItem`; caught by the caller in `onNotify`'s for-loop.  
+**Recovery**: Item remains un-trashed; `blockedCount` is not incremented; next item in batch is still processed.
+
+---
+
+### Scenario 5: Plugin is shutting down during item processing
 
 **Condition**: `addon.data.alive` is `false` when notifier callback fires.  
-**Response**: The notifier callback checks `addon.data.alive` first and unregisters itself.  
+**Response**: The notifier callback in `bootstrap.js` checks `addon.data.alive` and short-circuits.  
 **Recovery**: Pending items are not processed; clean shutdown.
 
 ---
@@ -499,19 +403,19 @@ END PROCEDURE
 
 The following properties must hold for all valid inputs:
 
-1. **No data loss**: For any item that is moved to trash, `item.deleted === true` and the item is recoverable from the Zotero trash. No item is permanently deleted.
+1. **No data loss**: For any item moved to trash, `trashTx` places it in the Zotero trash. No item is permanently deleted.
 
-2. **Idempotency of trash**: If `onItemAdd` is called with an id whose item already has `deleted === true`, the eligibility filter returns `null` and no further action is taken.
+2. **Idempotency of signature**: `getDuplicateSignature` is a pure function — for the same item fields, it always returns the same result.
 
-3. **Non-interference with non-duplicates**: For any item `i` where `checkForDuplicates(i.id)` returns an array of length <= 1, `i.deleted` remains `false` and `i` is not modified.
+3. **Non-interference with non-duplicates**: For any item `i` where no candidate with a matching signature exists in the library, `blockDuplicateItem(i)` returns `null` and `i` is not modified.
 
-4. **At-most-one survivor per duplicate set**: After `onItemAdd` processes a batch containing a duplicate, exactly one item from the duplicate pair survives (the pre-existing one). The newly added item is trashed.
+4. **At-most-one survivor per duplicate pair**: After `blockDuplicateItem` processes a new item that has a duplicate, the new item is trashed and the pre-existing item is returned as the survivor.
 
-5. **Notifier cleanup**: When the plugin shuts down, `Zotero.Notifier.unregisterObserver(notifierID)` is called exactly once. No orphaned observers remain.
+5. **No blocking of notes/attachments/feeds**: Items where `!item.isRegularItem() || item.isFeedItem` always return `null` from `getDuplicateSignature` and are never trashed.
 
-6. **No blocking of regular item types**: Notes (`item.isNote()`), attachments (`item.isAttachment()`), and feed items (`item.isFeedItem`) are never trashed by this plugin.
+6. **Single toast per batch**: `onNotify` accumulates a `blockedCount` and shows at most one `ProgressWindow` per notifier event, regardless of how many duplicates were in the batch.
 
-7. **Graceful degradation**: If `Zotero.Duplicates` is not available (e.g., API change in a future Zotero version), no items are trashed and no errors are surfaced to the user.
+7. **Signature kind consistency**: Two items are considered duplicates only when their signatures share the same `kind`. A DOI match is never conflated with an ISBN or title match.
 
 ---
 
@@ -521,36 +425,36 @@ The project uses `zotero-plugin-scaffold` with mocha/chai for integration tests 
 
 ### Unit Testing Approach
 
-Each static method of `NoDuplicatesFactory` should have isolated tests:
+Each exported function in `noDuplicates.ts` should have isolated tests:
 
-- `checkForDuplicates` with mocked `Zotero.Items.getAsync` returning: note items, attachment items, trashed items, regular items with no duplicates, regular items with duplicates
-- `trashItem` verifies `item.deleted === true` is set and `saveTx()` is called
-- `showBlockedWarning` verifies `ztoolkit.ProgressWindow` is constructed with expected text
+- `normalizeDOI` — strips URL prefix, lowercases
+- `normalizeISBN` — strips non-`[0-9X]` chars, uppercases
+- `getDuplicateSignature` — correct kind selection, null for ineligible items
+- `areItemsDuplicates` — returns true only when kind and value both match
+- `blockDuplicateItem` — with mocked `Zotero.Items.getAll`/`trashTx`: no-duplicate path returns null, duplicate path trashes and returns survivor
 
 ### Property-Based Testing Approach
 
-**Property Test Library**: mocha + chai (project's existing stack; no additional library needed)
+**Property Test Library**: mocha + chai (project's existing stack)
 
 Key properties to verify:
 
 ```typescript
-// Property 1: eligibility filter excludes all non-regular items
-for all items where !item.isRegularItem():
-  checkForDuplicates(item.id) returns null
+// Property 1: getDuplicateSignature returns null for non-regular items
+for all items where !item.isRegularItem() || item.isFeedItem:
+  getDuplicateSignature(item) returns null
 
-// Property 2: items already in trash are never trashed again
-for all items where item.deleted === true:
-  onItemAdd([item.id]) leaves item.deleted === true (no double-save)
+// Property 2: areItemsDuplicates is symmetric
+for all (a, b):
+  areItemsDuplicates(a, b) === areItemsDuplicates(b, a)
 
-// Property 3: items not in a duplicate set are never modified
-for all items where getSetItemsByItemID returns array.length <= 1:
-  item.deleted remains false after onItemAdd
+// Property 3: areItemsDuplicates is reflexive for eligible items
+for all items where getDuplicateSignature(item) !== null:
+  areItemsDuplicates(item, item) === true
 
-// Property 4: only the newly added item is trashed, not the existing one
-for all duplicate pairs (newItem, existingItem):
-  after onItemAdd([newItem.id]):
-    newItem.deleted === true
-    existingItem.deleted === false
+// Property 4: items with different signature kinds are never duplicates
+for all (a, b) where sig(a).kind !== sig(b).kind:
+  areItemsDuplicates(a, b) === false
 ```
 
 ### Integration Testing Approach
@@ -558,24 +462,25 @@ for all duplicate pairs (newItem, existingItem):
 Tests run against a live Zotero instance using `zotero-plugin-scaffold`:
 
 1. **Test: clean import** — import a unique item; verify it is NOT trashed
-2. **Test: duplicate import** — import an item identical to one already in the library; verify the new item is trashed and the original survives
-3. **Test: bulk import with mixed items** — import 3 items (1 unique, 2 duplicates of existing); verify only the 2 duplicates are trashed
-4. **Test: note/attachment passthrough** — add a note/attachment; verify it is never trashed
-5. **Test: shutdown cleanup** — trigger plugin shutdown; verify `Zotero.Notifier` has no orphaned observer from this plugin
+2. **Test: duplicate DOI import** — import an item with the same DOI as an existing item; verify the new item is trashed
+3. **Test: duplicate ISBN import** — same as above for ISBN
+4. **Test: duplicate title+creator+year import** — same for the fallback signature
+5. **Test: bulk import with mixed items** — import 3 items (1 unique, 2 duplicates); verify only duplicates are trashed; verify single toast
+6. **Test: note/attachment passthrough** — add a note/attachment; verify it is never trashed
 
 ---
 
 ## Performance Considerations
 
-- `Zotero.Duplicates._findDuplicates()` performs a full duplicate scan of the library on each call. For large libraries (> 10,000 items) this may add noticeable latency to each import. Consider caching or batching if this becomes a user-reported concern.
-- The notifier fires for every item add, including programmatic bulk imports. `onItemAdd` processes IDs sequentially with `await`; for large batches (e.g., importing 100 PDFs at once), this may queue up. If performance issues arise, the loop can be parallelised with `Promise.all` (with care around write contention on `saveTx`).
+- `blockDuplicateItem` calls `Zotero.Items.getAll(libraryID)` for every new item added. For large libraries (> 10,000 items) this is a linear scan on every import. If this becomes a user-reported concern, a signature cache could be built on startup and kept in sync via the notifier.
+- The notifier fires for every item add, including programmatic bulk imports. `onNotify` processes IDs sequentially with `await`; for large batches this serialises the scan. If needed, the loop could be parallelised with `Promise.all` (with care around write contention on `trashTx`).
 - All operations are async and non-blocking; they do not freeze the Zotero UI.
 
 ---
 
 ## Security Considerations
 
-- The plugin only reads item metadata and writes `item.deleted = true`. It does not access the filesystem, network, or any external service.
+- The plugin only reads item metadata and calls `Zotero.Items.trashTx`. It does not access the filesystem, network, or any external service.
 - No user credentials or sensitive data are processed.
 - The plugin operates entirely within the Zotero sandbox environment.
 
