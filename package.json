@@ -1,24 +1,24 @@
 {
-  "name": "zotero-plugin-template",
+  "name": "zotero-plugin-noduplicates",
   "type": "module",
-  "version": "3.1.0",
-  "description": "Zotero Plugin Template",
+  "version": "0.0.1",
+  "description": "A Zotero plugin to detect and manage duplicate items",
   "config": {
-    "addonName": "Zotero Plugin Template",
-    "addonID": "addontemplate@euclpts.com",
-    "addonRef": "addontemplate",
-    "addonInstance": "AddonTemplate",
-    "prefsPrefix": "extensions.zotero.addontemplate"
+    "addonName": "Zotero NoDuplicates",
+    "addonID": "zotero-plugin-noduplicates@CommanderPho",
+    "addonRef": "noduplicates",
+    "addonInstance": "NoDuplicates",
+    "prefsPrefix": "extensions.zotero.noduplicates"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/windingwind/zotero-plugin-template.git"
+    "url": "git+https://github.com/CommanderPho/zotero-plugin-noduplicates.git"
   },
-  "author": "windingwind",
+  "author": "CommanderPho",
   "bugs": {
-    "url": "https://github.com/windingwind/zotero-plugin-template/issues"
+    "url": "https://github.com/CommanderPho/zotero-plugin-noduplicates/issues"
   },
-  "homepage": "https://github.com/windingwind/zotero-plugin-template#readme",
+  "homepage": "https://github.com/CommanderPho/zotero-plugin-noduplicates#readme",
   "license": "AGPL-3.0-or-later",
   "scripts": {
     "start": "zotero-plugin serve",
